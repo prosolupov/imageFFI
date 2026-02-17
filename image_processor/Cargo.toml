@@ -1,0 +1,12 @@
+[package]
+name = "image_processor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap.workspace = true
+image.workspace = true
+libloading.workspace = true
+log.workspace = true
+env_logger.workspace = true
+thiserror.workspace = true
