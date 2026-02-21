@@ -21,9 +21,7 @@ pub enum AppError {
         #[source]
         source: image::ImageError,
     },
-    #[error(
-        "invalid RGBA buffer size for image {width}x{height} when saving {path}"
-    )]
+    #[error("invalid RGBA buffer size for image {width}x{height} when saving {path}")]
     InvalidSaveBuffer {
         path: PathBuf,
         width: u32,
@@ -31,6 +29,16 @@ pub enum AppError {
     },
     #[error("invalid RGBA buffer length: expected {expected}, got {actual}")]
     InvalidRgbaLen { expected: usize, actual: usize },
+    #[error("image dimensions are too large for RGBA buffer length calculation: {width}x{height}")]
+    ImageDimensionsTooLarge { width: u32, height: u32 },
+    #[error(
+        "plugin '{plugin}' returned error code {code} while processing params from {params_path}"
+    )]
+    PluginProcessingFailed {
+        plugin: String,
+        params_path: PathBuf,
+        code: i32,
+    },
     #[error("plugin params contain interior NUL byte")]
     InvalidParamsNul(#[from] NulError),
     #[error(transparent)]

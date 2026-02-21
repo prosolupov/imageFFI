@@ -2,6 +2,10 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::slice;
 
+const PROCESS_OK: i32 = 0;
+const PROCESS_INVALID_PARAMS: i32 = 1;
+const PROCESS_INVALID_INPUT: i32 = 2;
+
 #[derive(Clone, Copy)]
 struct BlurParams {
     radius: usize,
@@ -21,105 +25,172 @@ impl Default for BlurParams {
 /// # Safety
 /// `rgba_data` must point to a valid writable buffer of `width * height * 4` bytes.
 /// `params` must be either null or a valid NUL-terminated UTF-8 C string.
-pub unsafe extern "C" fn process_image(width: u32, height: u32, rgba_data: *mut u8, params: *const c_char) {
-    unsafe { process_image_impl(width, height, rgba_data, params) };
+pub unsafe extern "C" fn process_image(
+    width: u32,
+    height: u32,
+    rgba_data: *mut u8,
+    params: *const c_char,
+) -> i32 {
+    unsafe { process_image_impl(width, height, rgba_data, params) }
 }
 
-unsafe fn process_image_impl(width: u32, height: u32, rgba_data: *mut u8, params: *const c_char) {
+unsafe fn process_image_impl(
+    width: u32,
+    height: u32,
+    rgba_data: *mut u8,
+    params: *const c_char,
+) -> i32 {
     if rgba_data.is_null() {
-        return;
+        return PROCESS_INVALID_INPUT;
     }
 
     let w = width as usize;
     let h = height as usize;
     let pixel_count = match w.checked_mul(h) {
         Some(v) => v,
-        None => return,
+        None => return PROCESS_INVALID_INPUT,
     };
     let len = match pixel_count.checked_mul(4) {
         Some(v) => v,
-        None => return,
+        None => return PROCESS_INVALID_INPUT,
     };
 
-    let cfg = parse_params(params);
+    let cfg = match parse_params(params) {
+        Ok(cfg) => cfg,
+        Err(_) => return PROCESS_INVALID_PARAMS,
+    };
     if cfg.radius == 0 || cfg.iterations == 0 || len == 0 {
-        return;
+        return PROCESS_INVALID_INPUT;
     }
 
     let data = unsafe { slice::from_raw_parts_mut(rgba_data, len) };
     apply_weighted_blur(data, w, h, cfg.radius, cfg.iterations);
+    PROCESS_OK
 }
 
-fn apply_weighted_blur(data: &mut [u8], width: usize, height: usize, radius: usize, iterations: usize) {
+fn apply_weighted_blur(
+    data: &mut [u8],
+    width: usize,
+    height: usize,
+    radius: usize,
+    iterations: usize,
+) {
+    let mut tmp = vec![0u8; data.len()];
+    let mut dst = vec![0u8; data.len()];
+
     for _ in 0..iterations {
-        let src = data.to_vec();
-        let mut dst = vec![0u8; src.len()];
-
-        for y in 0..height {
-            for x in 0..width {
-                let mut sum = [0.0_f32; 4];
-                let mut weight_sum = 0.0_f32;
-
-                let y_start = y.saturating_sub(radius);
-                let y_end = (y + radius).min(height - 1);
-                let x_start = x.saturating_sub(radius);
-                let x_end = (x + radius).min(width - 1);
-
-                for ny in y_start..=y_end {
-                    for nx in x_start..=x_end {
-                        let dx = nx.abs_diff(x) as f32;
-                        let dy = ny.abs_diff(y) as f32;
-                        let dist = (dx * dx + dy * dy).sqrt();
-                        let weight = 1.0 / (1.0 + dist);
-
-                        let idx = (ny * width + nx) * 4;
-                        for c in 0..4 {
-                            sum[c] += src[idx + c] as f32 * weight;
-                        }
-                        weight_sum += weight;
-                    }
-                }
-
-                let out_idx = (y * width + x) * 4;
-                for c in 0..4 {
-                    dst[out_idx + c] = (sum[c] / weight_sum).round().clamp(0.0, 255.0) as u8;
-                }
-            }
-        }
-
+        horizontal_box_pass(data, &mut tmp, width, height, radius);
+        vertical_box_pass(&tmp, &mut dst, width, height, radius);
         data.copy_from_slice(&dst);
     }
 }
 
-fn parse_params(params: *const c_char) -> BlurParams {
+fn horizontal_box_pass(src: &[u8], dst: &mut [u8], width: usize, height: usize, radius: usize) {
+    for y in 0..height {
+        for c in 0..4 {
+            let mut start = 0usize;
+            let mut end = radius.min(width - 1);
+            let mut sum: u64 = 0;
+
+            for nx in start..=end {
+                sum += src[(y * width + nx) * 4 + c] as u64;
+            }
+
+            for x in 0..width {
+                let count = (end - start + 1) as u64;
+                dst[(y * width + x) * 4 + c] = (sum / count) as u8;
+
+                if x + 1 == width {
+                    continue;
+                }
+
+                let next_start = (x + 1).saturating_sub(radius);
+                let next_end = ((x + 1) + radius).min(width - 1);
+
+                if next_start > start {
+                    sum -= src[(y * width + start) * 4 + c] as u64;
+                }
+                if next_end > end {
+                    sum += src[(y * width + next_end) * 4 + c] as u64;
+                }
+
+                start = next_start;
+                end = next_end;
+            }
+        }
+    }
+}
+
+fn vertical_box_pass(src: &[u8], dst: &mut [u8], width: usize, height: usize, radius: usize) {
+    for x in 0..width {
+        for c in 0..4 {
+            let mut start = 0usize;
+            let mut end = radius.min(height - 1);
+            let mut sum: u64 = 0;
+
+            for ny in start..=end {
+                sum += src[(ny * width + x) * 4 + c] as u64;
+            }
+
+            for y in 0..height {
+                let count = (end - start + 1) as u64;
+                dst[(y * width + x) * 4 + c] = (sum / count) as u8;
+
+                if y + 1 == height {
+                    continue;
+                }
+
+                let next_start = (y + 1).saturating_sub(radius);
+                let next_end = ((y + 1) + radius).min(height - 1);
+
+                if next_start > start {
+                    sum -= src[(start * width + x) * 4 + c] as u64;
+                }
+                if next_end > end {
+                    sum += src[(next_end * width + x) * 4 + c] as u64;
+                }
+
+                start = next_start;
+                end = next_end;
+            }
+        }
+    }
+}
+
+fn parse_params(params: *const c_char) -> Result<BlurParams, ()> {
     let text = if params.is_null() {
         ""
     } else {
-        unsafe { CStr::from_ptr(params) }
-            .to_str()
-            .unwrap_or_default()
+        match unsafe { CStr::from_ptr(params) }.to_str() {
+            Ok(text) => text,
+            Err(_) => return Err(()),
+        }
     };
 
     let mut out = BlurParams::default();
-    for (key, value) in parse_pairs(text) {
+    for (key, value) in parse_pairs(text)? {
         match key.as_str() {
             "radius" => {
-                if let Ok(v) = value.parse::<usize>() {
-                    out.radius = v.max(1);
+                let v = value.parse::<usize>().map_err(|_| ())?;
+                if v == 0 {
+                    return Err(());
                 }
+                out.radius = v;
             }
             "iterations" => {
-                if let Ok(v) = value.parse::<usize>() {
-                    out.iterations = v.max(1);
+                let v = value.parse::<usize>().map_err(|_| ())?;
+                if v == 0 {
+                    return Err(());
                 }
+                out.iterations = v;
             }
-            _ => {}
+            _ => return Err(()),
         }
     }
-    out
+    Ok(out)
 }
 
-fn parse_pairs(text: &str) -> Vec<(String, String)> {
+fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, ()> {
     let mut out = Vec::new();
     for raw in text.split([',', '\n', ';']) {
         let cleaned = raw
@@ -131,14 +202,13 @@ fn parse_pairs(text: &str) -> Vec<(String, String)> {
         if cleaned.is_empty() {
             continue;
         }
-        let pair = cleaned
+        let (k, v) = cleaned
             .split_once('=')
-            .or_else(|| cleaned.split_once(':'));
-        if let Some((k, v)) = pair {
-            out.push((k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase()));
-        }
+            .or_else(|| cleaned.split_once(':'))
+            .ok_or(())?;
+        out.push((k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase()));
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -149,9 +219,23 @@ mod tests {
     #[test]
     fn parses_blur_params() {
         let params = CString::new("radius=3;iterations=2").expect("valid params");
-        let parsed = parse_params(params.as_ptr());
+        let parsed = parse_params(params.as_ptr()).expect("valid blur params");
         assert_eq!(parsed.radius, 3);
         assert_eq!(parsed.iterations, 2);
+    }
+
+    #[test]
+    fn rejects_unknown_key() {
+        let params = CString::new("horizontal=true").expect("valid params");
+        let parsed = parse_params(params.as_ptr());
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_numeric_value() {
+        let params = CString::new("radius=0").expect("valid params");
+        let parsed = parse_params(params.as_ptr());
+        assert!(parsed.is_err());
     }
 
     #[test]
@@ -164,15 +248,8 @@ mod tests {
     #[test]
     fn blur_changes_center_pixel() {
         let mut data = vec![
-            0, 0, 0, 255,
-            0, 0, 0, 255,
-            0, 0, 0, 255,
-            0, 0, 0, 255,
-            255, 255, 255, 255,
-            0, 0, 0, 255,
-            0, 0, 0, 255,
-            0, 0, 0, 255,
-            0, 0, 0, 255,
+            0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0,
+            255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
         ];
         apply_weighted_blur(&mut data, 3, 3, 1, 1);
         let center = &data[(4 * 4)..(4 * 4 + 4)];

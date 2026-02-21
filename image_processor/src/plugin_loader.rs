@@ -6,7 +6,7 @@ use libloading::{Library, Symbol};
 
 use crate::error::AppError;
 
-pub type PluginProcessFn = unsafe extern "C" fn(u32, u32, *mut u8, *const c_char);
+pub type PluginProcessFn = unsafe extern "C" fn(u32, u32, *mut u8, *const c_char) -> i32;
 
 pub struct LoadedPlugin {
     _library: Library,

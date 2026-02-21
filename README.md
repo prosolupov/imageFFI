@@ -36,7 +36,8 @@ cargo run -p image_processor -- \
 
 ```bash
 RUST_LOG=info cargo run -p image_processor -- \
-  <input.png> <output.png> <plugin_name> <params_file>
+  <input.png> <output.png> <plugin_name> <params_file> \
+  --plugin-path <plugins_dir>
 ```
 
 Аргументы:
@@ -44,14 +45,14 @@ RUST_LOG=info cargo run -p image_processor -- \
 - `output` — путь для сохранения результата;
 - `plugin` — имя плагина без расширения (например, `mirror_plugin` или `blur_plugin`);
 - `params` — путь к текстовому файлу с параметрами;
-- `--plugin-path` — директория с библиотеками плагинов (по умолчанию `target/debug`).
+- `--plugin-path` — директория с библиотеками плагинов (обязательный аргумент).
 
 ## API плагина
 
 Каждый плагин экспортирует:
 
 ```c
-void process_image(
+int32_t process_image(
     uint32_t width,
     uint32_t height,
     uint8_t* rgba_data,
@@ -61,10 +62,16 @@ void process_image(
 
 - `rgba_data` — массив длиной `width * height * 4`.
 - Плагин модифицирует буфер на месте.
+- Возвращаемые коды: `0` — успех, `1` — некорректные параметры, `2` — некорректные входные данные.
 
 ## Формат params
 
 Можно использовать простой текст вида `key=value`, `key:value`, разделители: запятая, `;` или новая строка.
+
+Параметры валидируются строго:
+- неизвестные ключи считаются ошибкой;
+- некорректные значения считаются ошибкой;
+- при ошибке плагин возвращает код ошибки, а `image_processor` завершает работу без записи выходного PNG.
 
 Примеры:
 
@@ -97,14 +104,40 @@ iterations=3
 
 ```bash
 cargo run -p image_processor -- \
-  input.png output_mirror.png mirror_plugin params_mirror.txt
+  input.png output_mirror.png mirror_plugin params_mirror.txt \
+  --plugin-path <plugins_dir>
 ```
 
 Размытие:
 
 ```bash
 cargo run -p image_processor -- \
-  input.png output_blur.png blur_plugin params_blur.txt
+  input.png output_blur.png blur_plugin params_blur.txt \
+  --plugin-path <plugins_dir>
+```
+
+## Готовые demo-файлы в репозитории
+
+В репозитории уже есть готовые картинки и файлы параметров:
+
+- картинки: `examples/images/input.png`;
+- параметры зеркала: `examples/params/mirror_horizontal.txt`, `examples/params/mirror_vertical.txt`;
+- параметры размытия: `examples/params/blur_soft.txt`, `examples/params/blur_strong.txt`.
+
+Пример запуска с ними:
+
+```bash
+cargo build -p mirror_plugin -p blur_plugin
+
+cargo run -p image_processor -- \
+  examples/images/input.png examples/output_mirror.png \
+  mirror_plugin examples/params/mirror_horizontal.txt \
+  --plugin-path target/debug
+
+cargo run -p image_processor -- \
+  examples/images/input.png examples/output_blur.png \
+  blur_plugin examples/params/blur_soft.txt \
+  --plugin-path target/debug
 ```
 
 ## Обработка ошибок

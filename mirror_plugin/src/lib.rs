@@ -2,6 +2,10 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::slice;
 
+const PROCESS_OK: i32 = 0;
+const PROCESS_INVALID_PARAMS: i32 = 1;
+const PROCESS_INVALID_INPUT: i32 = 2;
+
 #[derive(Clone, Copy, Default)]
 struct MirrorParams {
     horizontal: bool,
@@ -12,23 +16,36 @@ struct MirrorParams {
 /// # Safety
 /// `rgba_data` must point to a valid writable buffer of `width * height * 4` bytes.
 /// `params` must be either null or a valid NUL-terminated UTF-8 C string.
-pub unsafe extern "C" fn process_image(width: u32, height: u32, rgba_data: *mut u8, params: *const c_char) {
-    unsafe { process_image_impl(width, height, rgba_data, params) };
+pub unsafe extern "C" fn process_image(
+    width: u32,
+    height: u32,
+    rgba_data: *mut u8,
+    params: *const c_char,
+) -> i32 {
+    unsafe { process_image_impl(width, height, rgba_data, params) }
 }
 
-unsafe fn process_image_impl(width: u32, height: u32, rgba_data: *mut u8, params: *const c_char) {
+unsafe fn process_image_impl(
+    width: u32,
+    height: u32,
+    rgba_data: *mut u8,
+    params: *const c_char,
+) -> i32 {
     if rgba_data.is_null() {
-        return;
+        return PROCESS_INVALID_INPUT;
     }
     let pixel_count = match (width as usize).checked_mul(height as usize) {
         Some(v) => v,
-        None => return,
+        None => return PROCESS_INVALID_INPUT,
     };
     let len = match pixel_count.checked_mul(4) {
         Some(v) => v,
-        None => return,
+        None => return PROCESS_INVALID_INPUT,
     };
-    let mut cfg = parse_params(params);
+    let mut cfg = match parse_params(params) {
+        Ok(cfg) => cfg,
+        Err(_) => return PROCESS_INVALID_PARAMS,
+    };
 
     if !cfg.horizontal && !cfg.vertical {
         cfg.horizontal = true;
@@ -41,6 +58,8 @@ unsafe fn process_image_impl(width: u32, height: u32, rgba_data: *mut u8, params
     if cfg.vertical {
         mirror_vertical(data, width as usize, height as usize);
     }
+
+    PROCESS_OK
 }
 
 fn mirror_horizontal(data: &mut [u8], width: usize, height: usize) {
@@ -67,35 +86,32 @@ fn mirror_vertical(data: &mut [u8], width: usize, height: usize) {
     }
 }
 
-fn parse_params(params: *const c_char) -> MirrorParams {
+fn parse_params(params: *const c_char) -> Result<MirrorParams, ()> {
     let text = if params.is_null() {
         ""
     } else {
-        unsafe { CStr::from_ptr(params) }
-            .to_str()
-            .unwrap_or_default()
+        match unsafe { CStr::from_ptr(params) }.to_str() {
+            Ok(text) => text,
+            Err(_) => return Err(()),
+        }
     };
 
     let mut out = MirrorParams::default();
-    for (key, value) in parse_pairs(text) {
+    for (key, value) in parse_pairs(text)? {
         match key.as_str() {
             "horizontal" => {
-                if let Some(v) = parse_bool(&value) {
-                    out.horizontal = v;
-                }
+                out.horizontal = parse_bool(&value).ok_or(())?;
             }
             "vertical" => {
-                if let Some(v) = parse_bool(&value) {
-                    out.vertical = v;
-                }
+                out.vertical = parse_bool(&value).ok_or(())?;
             }
-            _ => {}
+            _ => return Err(()),
         }
     }
-    out
+    Ok(out)
 }
 
-fn parse_pairs(text: &str) -> Vec<(String, String)> {
+fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, ()> {
     let mut out = Vec::new();
     for raw in text.split([',', '\n', ';']) {
         let cleaned = raw
@@ -107,14 +123,13 @@ fn parse_pairs(text: &str) -> Vec<(String, String)> {
         if cleaned.is_empty() {
             continue;
         }
-        let pair = cleaned
+        let (k, v) = cleaned
             .split_once('=')
-            .or_else(|| cleaned.split_once(':'));
-        if let Some((k, v)) = pair {
-            out.push((k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase()));
-        }
+            .or_else(|| cleaned.split_once(':'))
+            .ok_or(())?;
+        out.push((k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase()));
     }
-    out
+    Ok(out)
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -133,9 +148,23 @@ mod tests {
     #[test]
     fn parses_bool_params() {
         let params = CString::new("horizontal=true,vertical=0").expect("valid params");
-        let parsed = parse_params(params.as_ptr());
+        let parsed = parse_params(params.as_ptr()).expect("valid mirror params");
         assert!(parsed.horizontal);
         assert!(!parsed.vertical);
+    }
+
+    #[test]
+    fn rejects_unknown_key() {
+        let params = CString::new("radius=2").expect("valid params");
+        let parsed = parse_params(params.as_ptr());
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_bool() {
+        let params = CString::new("horizontal=tru").expect("valid params");
+        let parsed = parse_params(params.as_ptr());
+        assert!(parsed.is_err());
     }
 
     #[test]

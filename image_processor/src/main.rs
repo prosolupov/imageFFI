@@ -22,7 +22,7 @@ struct CliArgs {
     output: PathBuf,
     plugin: String,
     params: PathBuf,
-    #[arg(long, default_value = "target/debug")]
+    #[arg(long)]
     plugin_path: PathBuf,
 }
 
@@ -48,11 +48,27 @@ fn run() -> Result<(), AppError> {
     info!("loading params: {}", args.params.display());
     let params_text = fs::read_to_string(&args.params)?;
     let params_cstr = CString::new(params_text)?;
-    info!("loading plugin '{}' from {}", args.plugin, args.plugin_path.display());
+    info!(
+        "loading plugin '{}' from {}",
+        args.plugin,
+        args.plugin_path.display()
+    );
     let loaded_plugin = load_plugin(&args.plugin_path, &args.plugin)?;
-    unsafe {
-        (loaded_plugin.process)(width, height, pixels_rgba.as_mut_ptr(), params_cstr.as_ptr())
+    let code = unsafe {
+        (loaded_plugin.process)(
+            width,
+            height,
+            pixels_rgba.as_mut_ptr(),
+            params_cstr.as_ptr(),
+        )
     };
+    if code != 0 {
+        return Err(AppError::PluginProcessingFailed {
+            plugin: args.plugin.clone(),
+            params_path: args.params.clone(),
+            code,
+        });
+    }
 
     info!("saving output image: {}", args.output.display());
     save_png_rgba(&args.output, width, height, pixels_rgba)?;
@@ -61,11 +77,12 @@ fn run() -> Result<(), AppError> {
 }
 
 fn save_png_rgba(path: &Path, width: u32, height: u32, pixels: Vec<u8>) -> Result<(), AppError> {
-    let image = RgbaImage::from_raw(width, height, pixels).ok_or_else(|| AppError::InvalidSaveBuffer {
-        path: path.to_path_buf(),
-        width,
-        height,
-    })?;
+    let image =
+        RgbaImage::from_raw(width, height, pixels).ok_or_else(|| AppError::InvalidSaveBuffer {
+            path: path.to_path_buf(),
+            width,
+            height,
+        })?;
     image.save_with_format(path, ImageFormat::Png)?;
     Ok(())
 }
@@ -104,7 +121,10 @@ fn load_png_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>), AppError> {
 }
 
 fn ensure_rgba_buffer_len(width: u32, height: u32, actual_len: usize) -> Result<(), AppError> {
-    let expected_len = width as usize * height as usize * 4;
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or(AppError::ImageDimensionsTooLarge { width, height })?;
     if actual_len != expected_len {
         return Err(AppError::InvalidRgbaLen {
             expected: expected_len,
